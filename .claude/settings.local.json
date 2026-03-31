@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python setup_project.py)",
+      "Bash(SRC=/tmp/boat_simulator_src/boat_simulator)",
+      "Bash(DEST=\"C:/Users/dor_r/OneDrive/Desktop/maze_solver/@Roomba_project/Random_Walk_Simulator_V3\")",
+      "Bash(__NEW_LINE_fe1c7e001bac5b61__ cp:*)",
+      "Bash(cp \"$SRC/simulation/engine.py\" \"$SRC/simulation/batch.py\" \"$SRC/simulation/statistics.py\" \"$SRC/simulation/__init__.py\" \"$DEST/src/boat_simulator/simulation/\")",
+      "Bash(cp \"$SRC/visualization/plotting.py\" \"$SRC/visualization/__init__.py\" \"$DEST/src/boat_simulator/visualization/\")"
+    ]
+  }
+}
