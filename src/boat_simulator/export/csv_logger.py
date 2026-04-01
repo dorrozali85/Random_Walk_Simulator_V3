@@ -110,6 +110,61 @@ def generate_batch_csv(batch_result: BatchResult) -> str:
     return output.getvalue()
 
 
+def generate_scan_csv(scan_result) -> str:
+    """
+    Generate CSV content for a parameter scan result.
+
+    Format: one row per standpoint with Moran's I values, std, gradient, coverage.
+    """
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    config = scan_result.config
+    param_info = f"{config.param_name} [{config.start} to {config.stop} step {config.step}]"
+
+    writer.writerow([f'Parameter Scan: {param_info}'])
+    writer.writerow([f'Runs per standpoint: {config.runs_per_standpoint}'])
+    writer.writerow([])
+
+    writer.writerow([
+        'ParamValue', 'Avg_Morans_I_X', 'Std_Morans_I_X',
+        'Avg_Morans_I_Y', 'Std_Morans_I_Y',
+        'Gradient_X', 'Gradient_Y',
+        'Avg_Coverage', 'Std_Coverage', 'Num_Runs'
+    ])
+
+    for i, point in enumerate(scan_result.points):
+        grad_x = scan_result.gradient_x[i] if scan_result.gradient_x is not None else ''
+        grad_y = scan_result.gradient_y[i] if scan_result.gradient_y is not None else ''
+        writer.writerow([
+            f"{point.param_value:.2f}",
+            f"{point.avg_morans_i_x:.6f}",
+            f"{point.std_morans_i_x:.6f}",
+            f"{point.avg_morans_i_y:.6f}",
+            f"{point.std_morans_i_y:.6f}",
+            f"{grad_x:.6f}" if isinstance(grad_x, float) else '',
+            f"{grad_y:.6f}" if isinstance(grad_y, float) else '',
+            f"{point.avg_coverage:.2f}",
+            f"{point.std_coverage:.2f}",
+            point.num_runs,
+        ])
+
+    writer.writerow([])
+    writer.writerow(['--- CONVERGENCE ---'])
+    if scan_result.convergence_index_x is not None:
+        cv = scan_result.points[scan_result.convergence_index_x].param_value
+        writer.writerow(['Convergence X', f"{cv:.2f}"])
+    else:
+        writer.writerow(['Convergence X', 'Not found'])
+    if scan_result.convergence_index_y is not None:
+        cv = scan_result.points[scan_result.convergence_index_y].param_value
+        writer.writerow(['Convergence Y', f"{cv:.2f}"])
+    else:
+        writer.writerow(['Convergence Y', 'Not found'])
+
+    return output.getvalue()
+
+
 def get_csv_filename(batch: bool, num_runs: int = 1) -> str:
     """Generate appropriate filename for CSV export."""
     if batch and num_runs > 1:

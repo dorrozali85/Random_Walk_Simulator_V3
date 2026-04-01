@@ -14,8 +14,13 @@ from datetime import datetime
 from simulation.engine import SimulationParams, run_single_simulation
 from simulation.statistics import calculate_all_statistics
 from simulation.batch import run_batch_simulation
+from simulation.parameter_scan import (
+    ScanConfig, ScanResult, SCANNABLE_PARAMS, run_parameter_scan
+)
 from visualization.plotting import create_path_figure, create_animated_figure, create_coverage_heatmap
-from export.csv_logger import generate_single_run_csv, generate_batch_csv, get_csv_filename
+from export.csv_logger import generate_single_run_csv, generate_batch_csv, generate_scan_csv, get_csv_filename
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 # Page configuration
 st.set_page_config(
@@ -85,10 +90,12 @@ def init_session_state():
     defaults = {
         'simulation_result': None,
         'batch_result': None,
+        'scan_result': None,
         'animation_progress': 1.0,
         'analysis_mode': False,
         'show_animation': False,
-        'run_count': 0
+        'run_count': 0,
+        'app_mode': 'simulator',
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -230,57 +237,353 @@ def display_event_log(result, max_events=50):
     st.markdown(f'<div class="log-area"><pre>{log_text}</pre></div>', unsafe_allow_html=True)
 
 
+def create_scan_results_figure(scan_result: ScanResult) -> go.Figure:
+    """Create a two-subplot figure showing Moran's I and gradient vs parameter value."""
+    config = scan_result.config
+    param_meta = SCANNABLE_PARAMS[config.param_name]
+    param_label = f"{param_meta['label']} ({param_meta['unit'].strip()})"
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=("Moran's I vs Parameter Value", "Gradient (Rate of Change)"),
+        vertical_spacing=0.15,
+        row_heights=[0.55, 0.45],
+    )
+
+    pv = scan_result.param_values
+    mi_x = scan_result.morans_i_x_values
+    mi_y = scan_result.morans_i_y_values
+    std_x = np.array([p.std_morans_i_x for p in scan_result.points])
+    std_y = np.array([p.std_morans_i_y for p in scan_result.points])
+
+    # Top plot: Moran's I with error bands
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        line=dict(color='#e74c3c', width=2), marker=dict(size=6),
+        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        line=dict(color='#3498db', width=2), marker=dict(size=6),
+        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+    ), row=1, col=1)
+
+    # Bottom plot: Gradient
+    if scan_result.gradient_x is not None:
+        fig.add_trace(go.Scatter(
+            x=pv, y=np.abs(scan_result.gradient_x), mode='lines+markers',
+            name='|Gradient X|', line=dict(color='#e74c3c', width=2, dash='dot'),
+            marker=dict(size=5),
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=pv, y=np.abs(scan_result.gradient_y), mode='lines+markers',
+            name='|Gradient Y|', line=dict(color='#3498db', width=2, dash='dot'),
+            marker=dict(size=5),
+        ), row=2, col=1)
+
+        # Threshold line
+        peak_grad = max(np.max(np.abs(scan_result.gradient_x)),
+                        np.max(np.abs(scan_result.gradient_y)))
+        threshold = 0.1 * peak_grad
+        fig.add_hline(y=threshold, line_dash="dash", line_color="gray",
+                      annotation_text="10% threshold", row=2, col=1)
+
+    # Convergence markers
+    for idx, color, label in [
+        (scan_result.convergence_index_x, '#e74c3c', 'Convergence X'),
+        (scan_result.convergence_index_y, '#3498db', 'Convergence Y'),
+    ]:
+        if idx is not None:
+            cv_val = pv[idx]
+            fig.add_vline(x=cv_val, line_dash="dash", line_color=color,
+                          annotation_text=f"{label}: {cv_val:.1f}", row=1, col=1)
+            fig.add_vline(x=cv_val, line_dash="dash", line_color=color, row=2, col=1)
+
+    fig.update_layout(
+        height=650,
+        plot_bgcolor='white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
+    fig.update_xaxes(title_text=param_label, row=2, col=1)
+    fig.update_xaxes(title_text=param_label, row=1, col=1)
+    fig.update_yaxes(title_text="Moran's I", row=1, col=1)
+    fig.update_yaxes(title_text="|Gradient|", row=2, col=1)
+
+    return fig
+
+
+def create_live_scan_figure(points, param_name, param_values_so_far):
+    """Create a live-updating figure during scan progress."""
+    param_meta = SCANNABLE_PARAMS[param_name]
+    param_label = f"{param_meta['label']} ({param_meta['unit'].strip()})"
+
+    fig = go.Figure()
+    pv = [p.param_value for p in points]
+    mi_x = [p.avg_morans_i_x for p in points]
+    mi_y = [p.avg_morans_i_y for p in points]
+    std_x = [p.std_morans_i_x for p in points]
+    std_y = [p.std_morans_i_y for p in points]
+
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        line=dict(color='#e74c3c', width=2), marker=dict(size=7),
+        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+    ))
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        line=dict(color='#3498db', width=2), marker=dict(size=7),
+        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+    ))
+
+    fig.update_layout(
+        title="Live Scan Progress",
+        xaxis_title=param_label,
+        yaxis_title="Moran's I (avg)",
+        height=400,
+        plot_bgcolor='white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
+    return fig
+
+
+def run_scanner_page():
+    """Render the Parameter Scanner page."""
+    st.markdown('<p class="section-header">Parameter Optimization Scanner</p>', unsafe_allow_html=True)
+    st.markdown(
+        "Sweep a single parameter across a range to find where **Moran's I stabilizes**. "
+        "All other parameters stay fixed at the values set in the sidebar."
+    )
+
+    # Scan configuration
+    scan_col1, scan_col2 = st.columns(2)
+
+    with scan_col1:
+        param_name = st.selectbox(
+            "Parameter to Scan",
+            options=list(SCANNABLE_PARAMS.keys()),
+            format_func=lambda k: SCANNABLE_PARAMS[k]['label'],
+            key="scan_param_name",
+        )
+        meta = SCANNABLE_PARAMS[param_name]
+
+        start_val = st.number_input(
+            f"Start ({meta['unit'].strip()})", min_value=meta['min'], max_value=meta['max'],
+            value=meta['min'], step=meta['default_step'], key="scan_start",
+        )
+        stop_val = st.number_input(
+            f"Stop ({meta['unit'].strip()})", min_value=meta['min'], max_value=meta['max'],
+            value=meta['max'], step=meta['default_step'], key="scan_stop",
+        )
+
+    with scan_col2:
+        step_val = st.number_input(
+            f"Step ({meta['unit'].strip()})", min_value=meta['default_step'] / 5,
+            max_value=(meta['max'] - meta['min']) / 2,
+            value=meta['default_step'], step=meta['default_step'] / 5,
+            key="scan_step",
+        )
+        runs_per = st.number_input(
+            "Runs per Standpoint", min_value=5, max_value=200, value=50, step=5,
+            key="scan_runs_per_standpoint",
+            help="Number of simulations at each parameter value for statistical confidence",
+        )
+        total_standpoints = len(np.arange(start_val, stop_val + step_val * 0.5, step_val))
+        total_sims = total_standpoints * runs_per
+        st.info(f"**{total_standpoints}** standpoints x **{runs_per}** runs = **{total_sims}** total simulations")
+
+    st.markdown("---")
+
+    # Run scan button
+    if st.button("Start Parameter Scan", type="primary", use_container_width=True, key="run_scan_btn"):
+        params = create_params_from_inputs()
+        config = ScanConfig(
+            param_name=param_name,
+            start=start_val,
+            stop=stop_val,
+            step=step_val,
+            runs_per_standpoint=runs_per,
+            base_seed=42,
+        )
+
+        # Progress UI elements
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        detail_text = st.empty()
+        live_chart = st.empty()
+        live_points = []
+
+        def on_standpoint_done(sp_idx, total_sp, param_val, point_result):
+            progress_bar.progress(sp_idx / total_sp)
+            unit = meta['unit']
+            status_text.markdown(
+                f"**Standpoint {sp_idx}/{total_sp}** completed "
+                f"| {meta['label']} = **{param_val:.1f}{unit}** "
+                f"| Moran's I(X) = **{point_result.avg_morans_i_x:.4f}** "
+                f"| Moran's I(Y) = **{point_result.avg_morans_i_y:.4f}**"
+            )
+            live_points.append(point_result)
+            if len(live_points) >= 2:
+                live_chart.plotly_chart(
+                    create_live_scan_figure(live_points, param_name, None),
+                    use_container_width=True,
+                )
+
+        def on_run_done(sp_idx, total_sp, run_idx, total_runs):
+            detail_text.text(
+                f"Standpoint {sp_idx}/{total_sp} - Run {run_idx}/{total_runs}"
+            )
+
+        scan_result = run_parameter_scan(
+            params, config,
+            standpoint_callback=on_standpoint_done,
+            run_callback=on_run_done,
+        )
+
+        st.session_state.scan_result = scan_result
+
+        progress_bar.empty()
+        status_text.empty()
+        detail_text.empty()
+        live_chart.empty()
+
+        st.success("Scan complete!")
+        st.rerun()
+
+    # Display results if available
+    if st.session_state.scan_result is not None:
+        scan_result = st.session_state.scan_result
+        cfg = scan_result.config
+        meta_r = SCANNABLE_PARAMS[cfg.param_name]
+
+        st.markdown("---")
+        st.markdown(f'<p class="section-header">Scan Results: {meta_r["label"]}</p>', unsafe_allow_html=True)
+
+        # Convergence summary
+        sum_col1, sum_col2 = st.columns(2)
+        with sum_col1:
+            if scan_result.convergence_index_x is not None:
+                cv = scan_result.points[scan_result.convergence_index_x].param_value
+                st.markdown(f"""
+                <div class="stat-box">
+                    <div class="stat-label">Convergence (Moran's I X)</div>
+                    <div class="stat-value">{cv:.1f}{meta_r['unit']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-box">
+                    <div class="stat-label">Convergence (Moran's I X)</div>
+                    <div class="stat-value">Not found in range</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        with sum_col2:
+            if scan_result.convergence_index_y is not None:
+                cv = scan_result.points[scan_result.convergence_index_y].param_value
+                st.markdown(f"""
+                <div class="stat-box">
+                    <div class="stat-label">Convergence (Moran's I Y)</div>
+                    <div class="stat-value">{cv:.1f}{meta_r['unit']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-box">
+                    <div class="stat-label">Convergence (Moran's I Y)</div>
+                    <div class="stat-value">Not found in range</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+        # Full results chart
+        fig = create_scan_results_figure(scan_result)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Data table
+        with st.expander("View Raw Data Table"):
+            import pandas as pd
+            rows = []
+            for i, pt in enumerate(scan_result.points):
+                row = {
+                    f"{meta_r['label']}": pt.param_value,
+                    "Avg Moran's I (X)": f"{pt.avg_morans_i_x:.4f}",
+                    "Std (X)": f"{pt.std_morans_i_x:.4f}",
+                    "Avg Moran's I (Y)": f"{pt.avg_morans_i_y:.4f}",
+                    "Std (Y)": f"{pt.std_morans_i_y:.4f}",
+                    "Avg Coverage %": f"{pt.avg_coverage:.1f}",
+                    "Runs": pt.num_runs,
+                }
+                if scan_result.gradient_x is not None:
+                    row["|Grad X|"] = f"{abs(scan_result.gradient_x[i]):.6f}"
+                    row["|Grad Y|"] = f"{abs(scan_result.gradient_y[i]):.6f}"
+                rows.append(row)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+        # Export
+        scan_csv = generate_scan_csv(scan_result)
+        st.download_button(
+            label="Export Scan Results CSV",
+            data=scan_csv,
+            file_name=f"scan_{cfg.param_name}_{cfg.start}_{cfg.stop}.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+
+
 def main():
     """Main application entry point."""
     init_session_state()
-    
+
     # Header
-    st.markdown('<h1 class="main-header">🚤 Boat Random Walk Simulator</h1>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">Boat Random Walk Simulator</h1>', unsafe_allow_html=True)
     st.markdown('<p style="text-align: center; color: #666;">Correlated random walk simulation with spatial statistics analysis</p>', unsafe_allow_html=True)
     st.markdown("---")
-    
-    # Sidebar - Parameters
+
+    # Mode selector tabs
+    tab_sim, tab_scan = st.tabs(["Simulator", "Parameter Scanner"])
+
+    # Sidebar - Parameters (shared by both modes)
     with st.sidebar:
-        st.header("⚙️ Simulation Parameters")
-        
+        st.header("Simulation Parameters")
+
         st.subheader("Pool Dimensions")
-        st.number_input("Pool Width (m)", min_value=1.0, max_value=100.0, value=12.5, 
+        st.number_input("Pool Width (m)", min_value=1.0, max_value=100.0, value=12.5,
                        step=0.5, key="pool_width")
-        st.number_input("Pool Height (m)", min_value=1.0, max_value=100.0, value=25.0, 
+        st.number_input("Pool Height (m)", min_value=1.0, max_value=100.0, value=25.0,
                        step=0.5, key="pool_height")
-        
+
         st.subheader("Movement Parameters")
-        st.number_input("Initial Angle (°)", min_value=0.0, max_value=360.0, value=45.0, 
+        st.number_input("Initial Angle", min_value=0.0, max_value=360.0, value=45.0,
                        step=5.0, key="alpha")
-        st.number_input("Min Delta Angle (°)", min_value=0.0, max_value=90.0, value=25.0, 
+        st.number_input("Min Delta Angle", min_value=0.0, max_value=90.0, value=25.0,
                        step=5.0, key="min_delta")
-        st.number_input("Max Delta Angle (°)", min_value=0.0, max_value=90.0, value=45.0, 
+        st.number_input("Max Delta Angle", min_value=0.0, max_value=90.0, value=45.0,
                        step=5.0, key="max_delta")
-        st.number_input("Cruise Speed (m/s)", min_value=0.01, max_value=2.0, value=0.2, 
+        st.number_input("Cruise Speed (m/s)", min_value=0.01, max_value=2.0, value=0.2,
                        step=0.05, key="cruise_speed")
-        
+
         st.subheader("Edge Behavior")
-        st.number_input("Slowdown Factor", min_value=0.1, max_value=1.0, value=0.5, 
+        st.number_input("Slowdown Factor", min_value=0.1, max_value=1.0, value=0.5,
                        step=0.1, key="slowdown_factor")
-        st.number_input("Edge Buffer (m)", min_value=0.1, max_value=5.0, value=0.5, 
+        st.number_input("Edge Buffer (m)", min_value=0.1, max_value=5.0, value=0.5,
                        step=0.1, key="edge_buffer")
-        
+
         st.subheader("Sampling")
-        st.number_input("Sample Interval (min)", min_value=1.0, max_value=60.0, value=10.0, 
+        st.number_input("Sample Interval (min)", min_value=1.0, max_value=60.0, value=10.0,
                        step=1.0, key="sample_interval")
-        st.number_input("Max Samples", min_value=1, max_value=50, value=5, 
+        st.number_input("Max Samples", min_value=1, max_value=50, value=5,
                        step=1, key="max_samples")
-        
+
         st.markdown("---")
-        
+
         st.subheader("Batch Settings")
-        num_runs = st.number_input("Number of Runs", min_value=1, max_value=100, value=1, 
+        num_runs = st.number_input("Number of Runs", min_value=1, max_value=100, value=1,
                                    step=1, key="num_runs")
-        
+
         # Run button
-        if st.button("🚀 Run Simulation", type="primary", use_container_width=True):
+        if st.button("Run Simulation", type="primary", use_container_width=True):
             params = create_params_from_inputs()
-            
+
             if num_runs == 1:
                 # Single run
                 with st.spinner("Running simulation..."):
@@ -293,153 +596,148 @@ def main():
                 # Batch run
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
+
                 def update_progress(current, total):
                     progress_bar.progress(current / total)
                     status_text.text(f"Running simulation {current}/{total}...")
-                
-                batch_result = run_batch_simulation(params, num_runs, 
+
+                batch_result = run_batch_simulation(params, num_runs,
                                                     progress_callback=update_progress)
-                
+
                 st.session_state.batch_result = batch_result
                 st.session_state.simulation_result = batch_result.runs[-1]  # Last run for visualization
                 st.session_state.run_count += 1
-                
+
                 progress_bar.empty()
                 status_text.empty()
-            
-            st.success("✅ Simulation complete!")
-        
+
+            st.success("Simulation complete!")
+
         # Reset button
-        if st.button("🔄 Reset", use_container_width=True):
+        if st.button("Reset", use_container_width=True):
             st.session_state.simulation_result = None
             st.session_state.batch_result = None
+            st.session_state.scan_result = None
             st.session_state.animation_progress = 1.0
             st.session_state.analysis_mode = False
             st.rerun()
-    
-    # Main content area - Three columns
-    if st.session_state.batch_result is not None:
-        # Show bulk stats panel when batch run exists
-        left_col, center_col, right_col = st.columns([1.2, 1.5, 1.3])
-        
-        with left_col:
-            display_bulk_stats(st.session_state.batch_result)
-    else:
-        center_col, right_col = st.columns([1.5, 1.5])
-    
-    result = st.session_state.simulation_result
-    
-    # Center column - Visualization
-    with center_col if st.session_state.batch_result else center_col:
-        st.markdown('<p class="section-header">🗺️ Visualization</p>', unsafe_allow_html=True)
-        
-        if result is not None:
-            # View controls
-            view_col1, view_col2, view_col3 = st.columns(3)
-            
-            with view_col1:
-                analysis_mode = st.checkbox("Analysis Mode", value=st.session_state.analysis_mode,
-                                           help="Show only samples with nearest-neighbor connections")
-                st.session_state.analysis_mode = analysis_mode
-            
-            with view_col2:
-                show_heatmap = st.checkbox("Coverage Heatmap", value=False,
-                                          help="Show coverage intensity heatmap")
-            
-            with view_col3:
-                animation_progress = st.slider("Animation Progress", 0.0, 1.0, 1.0, 0.01,
-                                              help="Scrub through simulation timeline")
-            
-            # Create and display figure
-            if show_heatmap:
-                fig = create_coverage_heatmap(result)
-            else:
-                fig = create_path_figure(
-                    result,
-                    analysis_mode=analysis_mode,
-                    animation_progress=animation_progress,
-                    title=f"Run #{st.session_state.run_count}"
-                )
-            
-            st.plotly_chart(fig, use_container_width=True)
+
+    # === SIMULATOR TAB ===
+    with tab_sim:
+        # Main content area - Three columns
+        if st.session_state.batch_result is not None:
+            left_col, center_col, right_col = st.columns([1.2, 1.5, 1.3])
+            with left_col:
+                display_bulk_stats(st.session_state.batch_result)
         else:
-            st.info("👆 Configure parameters and click 'Run Simulation' to start")
-            
-            # Show empty pool preview
-            preview_params = create_params_from_inputs()
-            import plotly.graph_objects as go
-            fig = go.Figure()
-            fig.add_shape(
-                type="rect", x0=0, y0=0,
-                x1=preview_params.pool_width, y1=preview_params.pool_height,
-                line=dict(color="#1e3a5f", width=3),
-                fillcolor="rgba(200, 230, 255, 0.3)"
-            )
-            fig.update_layout(
-                title="Pool Preview",
-                xaxis=dict(title="Width (m)", range=[-1, preview_params.pool_width + 1]),
-                yaxis=dict(title="Length (m)", range=[-1, preview_params.pool_height + 1],
-                          scaleanchor="x"),
-                height=500, width=400,
-                plot_bgcolor='white'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-    
-    # Right column - Stats and Export
-    with right_col:
-        if result is not None:
-            # Single run statistics
-            display_single_run_stats(result)
-            
-            st.markdown("---")
-            
-            # Export buttons
-            st.markdown('<p class="section-header">💾 Export</p>', unsafe_allow_html=True)
-            
-            export_col1, export_col2 = st.columns(2)
-            
-            with export_col1:
-                # Single run CSV
-                csv_content = generate_single_run_csv(result)
-                st.download_button(
-                    label="📥 Export Single Run CSV",
-                    data=csv_content,
-                    file_name="simulation_single_run.csv",
-                    mime="text/csv",
-                    use_container_width=True
+            center_col, right_col = st.columns([1.5, 1.5])
+
+        result = st.session_state.simulation_result
+
+        # Center column - Visualization
+        with center_col:
+            st.markdown('<p class="section-header">Visualization</p>', unsafe_allow_html=True)
+
+            if result is not None:
+                view_col1, view_col2, view_col3 = st.columns(3)
+
+                with view_col1:
+                    analysis_mode = st.checkbox("Analysis Mode", value=st.session_state.analysis_mode,
+                                               help="Show only samples with nearest-neighbor connections")
+                    st.session_state.analysis_mode = analysis_mode
+
+                with view_col2:
+                    show_heatmap = st.checkbox("Coverage Heatmap", value=False,
+                                              help="Show coverage intensity heatmap")
+
+                with view_col3:
+                    animation_progress = st.slider("Animation Progress", 0.0, 1.0, 1.0, 0.01,
+                                                  help="Scrub through simulation timeline")
+
+                if show_heatmap:
+                    fig = create_coverage_heatmap(result)
+                else:
+                    fig = create_path_figure(
+                        result,
+                        analysis_mode=analysis_mode,
+                        animation_progress=animation_progress,
+                        title=f"Run #{st.session_state.run_count}"
+                    )
+
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Configure parameters and click 'Run Simulation' to start")
+
+                preview_params = create_params_from_inputs()
+                fig = go.Figure()
+                fig.add_shape(
+                    type="rect", x0=0, y0=0,
+                    x1=preview_params.pool_width, y1=preview_params.pool_height,
+                    line=dict(color="#1e3a5f", width=3),
+                    fillcolor="rgba(200, 230, 255, 0.3)"
                 )
-            
-            with export_col2:
-                # Batch CSV (if available)
-                if st.session_state.batch_result is not None:
-                    batch_csv = generate_batch_csv(st.session_state.batch_result)
-                    num_runs = st.session_state.batch_result.statistics.num_runs
+                fig.update_layout(
+                    title="Pool Preview",
+                    xaxis=dict(title="Width (m)", range=[-1, preview_params.pool_width + 1]),
+                    yaxis=dict(title="Length (m)", range=[-1, preview_params.pool_height + 1],
+                              scaleanchor="x"),
+                    height=500, width=400,
+                    plot_bgcolor='white'
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Right column - Stats and Export
+        with right_col:
+            if result is not None:
+                display_single_run_stats(result)
+
+                st.markdown("---")
+
+                st.markdown('<p class="section-header">Export</p>', unsafe_allow_html=True)
+
+                export_col1, export_col2 = st.columns(2)
+
+                with export_col1:
+                    csv_content = generate_single_run_csv(result)
                     st.download_button(
-                        label="📥 Export Batch CSV",
-                        data=batch_csv,
-                        file_name=f"simulation_batch_{num_runs}_runs.csv",
+                        label="Export Single Run CSV",
+                        data=csv_content,
+                        file_name="simulation_single_run.csv",
                         mime="text/csv",
                         use_container_width=True
                     )
-                else:
-                    st.button("📥 Export Batch CSV", disabled=True, use_container_width=True,
-                             help="Run a batch simulation first")
-            
-            st.markdown("---")
-            
-            # Event log
-            display_event_log(result)
-        else:
-            st.markdown('<p class="section-header">📊 Statistics</p>', unsafe_allow_html=True)
-            st.info("Run a simulation to see statistics")
-    
+
+                with export_col2:
+                    if st.session_state.batch_result is not None:
+                        batch_csv = generate_batch_csv(st.session_state.batch_result)
+                        num_runs_val = st.session_state.batch_result.statistics.num_runs
+                        st.download_button(
+                            label="Export Batch CSV",
+                            data=batch_csv,
+                            file_name=f"simulation_batch_{num_runs_val}_runs.csv",
+                            mime="text/csv",
+                            use_container_width=True
+                        )
+                    else:
+                        st.button("Export Batch CSV", disabled=True, use_container_width=True,
+                                 help="Run a batch simulation first")
+
+                st.markdown("---")
+                display_event_log(result)
+            else:
+                st.markdown('<p class="section-header">Statistics</p>', unsafe_allow_html=True)
+                st.info("Run a simulation to see statistics")
+
+    # === PARAMETER SCANNER TAB ===
+    with tab_scan:
+        run_scanner_page()
+
     # Footer
     st.markdown("---")
     st.markdown("""
     <div style="text-align: center; color: #888; font-size: 0.85rem;">
         <p>Boat Random Walk Simulator | Master's Project Tool</p>
-        <p>Correlated random walk • Moran's I spatial autocorrelation • Coverage analysis</p>
+        <p>Correlated random walk | Moran's I spatial autocorrelation | Coverage analysis</p>
     </div>
     """, unsafe_allow_html=True)
 
