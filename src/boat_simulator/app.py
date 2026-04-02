@@ -1,3 +1,4 @@
+# Version: v3.1  |  Date: 2026-04-02
 """
 Boat Simulator - Streamlit Application
 A simulation tool for modeling a robotic boat performing correlated random walk
@@ -8,6 +9,7 @@ Run with: streamlit run app.py
 
 import streamlit as st
 import numpy as np
+import os
 from datetime import datetime
 
 # Import simulation modules
@@ -18,9 +20,13 @@ from simulation.parameter_scan import (
     ScanConfig, ScanResult, SCANNABLE_PARAMS, run_parameter_scan
 )
 from visualization.plotting import create_path_figure, create_animated_figure, create_coverage_heatmap
-from export.csv_logger import generate_single_run_csv, generate_batch_csv, generate_scan_csv, get_csv_filename
+from export.csv_logger import generate_single_run_csv, generate_batch_csv, generate_scan_csv, get_csv_filename, save_log_file
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+
+# Results directory — module-level so all functions can access it
+RESULTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'results'))
+os.makedirs(RESULTS_DIR, exist_ok=True)
 
 # Page configuration
 st.set_page_config(
@@ -96,6 +102,7 @@ def init_session_state():
         'show_animation': False,
         'run_count': 0,
         'app_mode': 'simulator',
+        'last_saved_path': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -237,6 +244,263 @@ def display_event_log(result, max_events=50):
     st.markdown(f'<div class="log-area"><pre>{log_text}</pre></div>', unsafe_allow_html=True)
 
 
+def save_screenshot(fig: go.Figure, base_path: str) -> str:
+    """
+    Save a Plotly figure as a PNG screenshot alongside the log file.
+    base_path should be the CSV path (without .csv); .png will be appended.
+    Returns the saved PNG path, or None if kaleido is unavailable.
+    """
+    png_path = base_path.replace('.csv', '.png')
+    try:
+        fig.write_image(png_path, width=1400, height=900, scale=2)
+        return png_path
+    except Exception:
+        return None
+
+
+def build_run_screenshot_figure(result, batch_result=None) -> go.Figure:
+    """
+    Build a composite figure for a simulator run (single or batch):
+    - Left subplot: boat path with sample points
+    - Right subplot: stats table (Moran's I, coverage, distances)
+    """
+    fig = make_subplots(
+        rows=1, cols=2,
+        column_widths=[0.65, 0.35],
+        subplot_titles=("Simulation Path", "Run Statistics"),
+        specs=[[{"type": "xy"}, {"type": "table"}]],
+    )
+
+    # Left: path trace
+    if result.path:
+        px = [pt.x for pt in result.path]
+        py = [pt.y for pt in result.path]
+        fig.add_trace(go.Scatter(
+            x=px, y=py, mode='lines', name='Path',
+            line=dict(color='#3498db', width=1), opacity=0.6,
+        ), row=1, col=1)
+
+    # Sample points
+    if result.samples:
+        sx = [s.x for s in result.samples]
+        sy = [s.y for s in result.samples]
+        fig.add_trace(go.Scatter(
+            x=sx, y=sy, mode='markers+text', name='Samples',
+            marker=dict(size=12, color='#e74c3c', symbol='circle'),
+            text=[str(s.sample_number) for s in result.samples],
+            textposition='top center',
+        ), row=1, col=1)
+
+    # Pool boundary
+    p = result.params
+    fig.add_shape(type='rect', x0=0, y0=0, x1=p.pool_width, y1=p.pool_height,
+                  line=dict(color='#1e3a5f', width=2), row=1, col=1)
+
+    # Right: stats as a table
+    if batch_result is not None:
+        stats = batch_result.statistics
+        labels = ["Avg Moran's I (X)", "Avg Moran's I (Y)", "Avg Coverage %",
+                  "Avg Min Dist (m)", "Avg Avg Dist (m)", "Avg Max Dist (m)",
+                  "Runs"]
+        values = [
+            f"{stats.avg_morans_i_x:.4f} ± {stats.std_morans_i_x:.4f}",
+            f"{stats.avg_morans_i_y:.4f} ± {stats.std_morans_i_y:.4f}",
+            f"{stats.avg_coverage:.1f}% ± {stats.std_coverage:.1f}%",
+            f"{stats.avg_min_distance:.2f}",
+            f"{stats.avg_avg_distance:.2f}",
+            f"{stats.avg_max_distance:.2f}",
+            str(stats.num_runs),
+        ]
+    else:
+        labels = ["Moran's I (X)", "Moran's I (Y)", "Coverage %",
+                  "Min Dist (m)", "Avg Dist (m)", "Max Dist (m)",
+                  "Wall Hits", "Total Time (min)"]
+        values = [
+            f"{result.morans_i_x:.4f}",
+            f"{result.morans_i_y:.4f}",
+            f"{result.coverage_percent:.1f}%",
+            f"{result.min_distance:.2f}",
+            f"{result.avg_distance:.2f}",
+            f"{result.max_distance:.2f}",
+            str(result.num_wall_hits),
+            f"{result.total_time / 60:.1f}",
+        ]
+
+    fig.add_trace(go.Table(
+        header=dict(values=["Metric", "Value"],
+                    fill_color='#1e3a5f', font=dict(color='white', size=13),
+                    align='left'),
+        cells=dict(values=[labels, values],
+                   fill_color=[['#f5f7fa', '#e4e8ec'] * (len(labels) // 2 + 1)],
+                   align='left', font=dict(size=12)),
+    ), row=1, col=2)
+
+    run_type = f"Batch ({batch_result.statistics.num_runs} runs)" if batch_result else "Single Run"
+    fig.update_layout(
+        title=dict(text=f"Boat Simulator — {run_type}", font=dict(size=18)),
+        height=700,
+        plot_bgcolor='white',
+        showlegend=True,
+    )
+    fig.update_xaxes(title_text="Width (m)", scaleanchor="y", row=1, col=1)
+    fig.update_yaxes(title_text="Length (m)", row=1, col=1)
+    return fig
+
+
+def build_sweep_screenshot_figure(scan_result: ScanResult) -> go.Figure:
+    """
+    Build a composite screenshot figure for a sweep run:
+    - Left column (2 rows): Moran's I chart (top) + Gradient chart (bottom)
+    - Right column (spans both rows): summary results table
+    """
+    config = scan_result.config
+    param_meta = SCANNABLE_PARAMS[config.param_name]
+    param_label = f"{param_meta['label']} ({param_meta['unit'].strip()})"
+
+    fig = make_subplots(
+        rows=2, cols=2,
+        column_widths=[0.65, 0.35],
+        row_heights=[0.55, 0.45],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+        subplot_titles=("Moran's I vs Parameter Value", "Scan Summary", "Gradient (Rate of Change)", ""),
+        specs=[
+            [{"type": "xy"}, {"type": "table", "rowspan": 2}],
+            [{"type": "xy"}, None],
+        ],
+    )
+
+    pv = scan_result.param_values
+    mi_x = scan_result.morans_i_x_values
+    mi_y = scan_result.morans_i_y_values
+    std_x = np.array([p.std_morans_i_x for p in scan_result.points])
+    std_y = np.array([p.std_morans_i_y for p in scan_result.points])
+
+    # Top-left: Moran's I lines
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        line=dict(color='#e74c3c', width=2), marker=dict(size=6),
+        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        line=dict(color='#3498db', width=2), marker=dict(size=6),
+        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+    ), row=1, col=1)
+
+    # Bottom-left: Gradient
+    if scan_result.gradient_x is not None:
+        fig.add_trace(go.Scatter(
+            x=pv, y=np.abs(scan_result.gradient_x), mode='lines+markers',
+            name='|Gradient X|', line=dict(color='#e74c3c', width=2, dash='dot'), marker=dict(size=5),
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=pv, y=np.abs(scan_result.gradient_y), mode='lines+markers',
+            name='|Gradient Y|', line=dict(color='#3498db', width=2, dash='dot'), marker=dict(size=5),
+        ), row=2, col=1)
+        peak_grad = max(np.max(np.abs(scan_result.gradient_x)), np.max(np.abs(scan_result.gradient_y)))
+        fig.add_hline(y=0.1 * peak_grad, line_dash="dash", line_color="gray",
+                      annotation_text="10% threshold", row=2, col=1)
+
+    # Convergence + best markers on both charts
+    for idx, color, label in [
+        (scan_result.convergence_index_x, '#e74c3c', 'Convergence X'),
+        (scan_result.convergence_index_y, '#3498db', 'Convergence Y'),
+    ]:
+        if idx is not None:
+            cv_val = pv[idx]
+            fig.add_vline(x=cv_val, line_dash="dash", line_color=color,
+                          annotation_text=f"{label}: {cv_val:.1f}", row=1, col=1)
+            fig.add_vline(x=cv_val, line_dash="dash", line_color=color, row=2, col=1)
+
+    if scan_result.best_combined_index is not None:
+        bi = scan_result.best_combined_index
+        best_pv = pv[bi]
+        fig.add_vline(x=best_pv, line_dash="solid", line_color="#2ecc71", line_width=2,
+                      annotation_text=f"Best: {best_pv:.1f}", annotation_font_color="#2ecc71",
+                      row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[best_pv, best_pv], y=[mi_x[bi], mi_y[bi]],
+            mode='markers', name='Best (lowest combined)',
+            marker=dict(size=16, color='#2ecc71', symbol='star',
+                        line=dict(width=1, color='darkgreen')),
+        ), row=1, col=1)
+
+    # Right column: summary table
+    best_pt = scan_result.points[scan_result.best_combined_index] if scan_result.best_combined_index is not None else None
+    cv_x_val = f"{pv[scan_result.convergence_index_x]:.1f}{param_meta['unit']}" if scan_result.convergence_index_x is not None else "Not found"
+    cv_y_val = f"{pv[scan_result.convergence_index_y]:.1f}{param_meta['unit']}" if scan_result.convergence_index_y is not None else "Not found"
+
+    table_labels = [
+        "Scanned Parameter",
+        "Scan Range",
+        "Step",
+        "Runs / Standpoint",
+        "Total Standpoints",
+        "Total Simulations",
+        "",
+        "Best Parameter Value",
+        "Best Combined Score",
+        "Best Moran's I (X)",
+        "Best Moran's I (Y)",
+        "Best Coverage %",
+        "",
+        "Convergence (X)",
+        "Convergence (Y)",
+    ]
+    table_values = [
+        param_meta['label'],
+        f"{config.start}{param_meta['unit']} → {config.stop}{param_meta['unit']}",
+        f"{config.step}{param_meta['unit']}",
+        str(config.runs_per_standpoint),
+        str(len(scan_result.points)),
+        str(len(scan_result.points) * config.runs_per_standpoint),
+        "",
+        f"{best_pt.param_value:.1f}{param_meta['unit']}" if best_pt else "N/A",
+        f"{best_pt.avg_morans_i_x + best_pt.avg_morans_i_y:.4f}" if best_pt else "N/A",
+        f"{best_pt.avg_morans_i_x:.4f}" if best_pt else "N/A",
+        f"{best_pt.avg_morans_i_y:.4f}" if best_pt else "N/A",
+        f"{best_pt.avg_coverage:.1f}%" if best_pt else "N/A",
+        "",
+        cv_x_val,
+        cv_y_val,
+    ]
+
+    row_colors = []
+    for lbl in table_labels:
+        if lbl == "":
+            row_colors.append('#d0f0c0')  # light green separator
+        elif lbl.startswith("Best"):
+            row_colors.append('#e8f8e8')
+        elif lbl.startswith("Convergence"):
+            row_colors.append('#e8f0f8')
+        else:
+            row_colors.append('#f5f7fa')
+
+    fig.add_trace(go.Table(
+        header=dict(values=["Metric", "Value"],
+                    fill_color='#1e3a5f', font=dict(color='white', size=13), align='left'),
+        cells=dict(
+            values=[table_labels, table_values],
+            fill_color=[[c for c in row_colors], [c for c in row_colors]],
+            align='left', font=dict(size=12),
+            height=24,
+        ),
+    ), row=1, col=2)
+
+    fig.update_layout(
+        title=dict(text=f"Parameter Sweep — {param_meta['label']}", font=dict(size=18)),
+        height=850,
+        plot_bgcolor='white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.3),
+    )
+    fig.update_xaxes(title_text=param_label, row=1, col=1)
+    fig.update_xaxes(title_text=param_label, row=2, col=1)
+    fig.update_yaxes(title_text="Moran's I", row=1, col=1)
+    fig.update_yaxes(title_text="|Gradient|", row=2, col=1)
+    return fig
+
+
 def create_scan_results_figure(scan_result: ScanResult) -> go.Figure:
     """Create a two-subplot figure showing Moran's I and gradient vs parameter value."""
     config = scan_result.config
@@ -300,6 +564,21 @@ def create_scan_results_figure(scan_result: ScanResult) -> go.Figure:
                           annotation_text=f"{label}: {cv_val:.1f}", row=1, col=1)
             fig.add_vline(x=cv_val, line_dash="dash", line_color=color, row=2, col=1)
 
+    # Best combined point marker (green star)
+    if scan_result.best_combined_index is not None:
+        bi = scan_result.best_combined_index
+        best_pv = pv[bi]
+        fig.add_vline(x=best_pv, line_dash="solid", line_color="#2ecc71", line_width=2,
+                      annotation_text=f"Best: {best_pv:.1f}",
+                      annotation_font_color="#2ecc71", row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=[best_pv, best_pv], y=[mi_x[bi], mi_y[bi]],
+            mode='markers', name='Best (lowest combined)',
+            marker=dict(size=16, color='#2ecc71', symbol='star',
+                        line=dict(width=1, color='darkgreen')),
+            showlegend=True,
+        ), row=1, col=1)
+
     fig.update_layout(
         height=650,
         plot_bgcolor='white',
@@ -335,6 +614,19 @@ def create_live_scan_figure(points, param_name, param_values_so_far):
         line=dict(color='#3498db', width=2), marker=dict(size=7),
         error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
     ))
+
+    # Mark current best point (lowest combined)
+    if len(points) >= 1:
+        combined = [p.avg_morans_i_x + p.avg_morans_i_y for p in points]
+        best_idx = int(np.argmin(combined))
+        best_p = points[best_idx]
+        fig.add_trace(go.Scatter(
+            x=[best_p.param_value, best_p.param_value],
+            y=[best_p.avg_morans_i_x, best_p.avg_morans_i_y],
+            mode='markers', name=f'Best so far ({best_p.param_value:.1f})',
+            marker=dict(size=14, color='#2ecc71', symbol='star',
+                        line=dict(width=1, color='darkgreen')),
+        ))
 
     fig.update_layout(
         title="Live Scan Progress",
@@ -447,7 +739,15 @@ def run_scanner_page():
         detail_text.empty()
         live_chart.empty()
 
-        st.success("Scan complete!")
+        total_sims = len(scan_result.points) * config.runs_per_standpoint
+        csv_content = generate_scan_csv(scan_result)
+        saved_path = save_log_file(csv_content, RESULTS_DIR, 'sweep', total_sims)
+        st.session_state.last_saved_path = saved_path
+        fig_screenshot = build_sweep_screenshot_figure(scan_result)
+        save_screenshot(fig_screenshot, saved_path)
+
+        fname = os.path.basename(saved_path)
+        st.success(f"Scan complete! Log saved: `{fname}`")
         st.rerun()
 
     # Display results if available
@@ -459,8 +759,8 @@ def run_scanner_page():
         st.markdown("---")
         st.markdown(f'<p class="section-header">Scan Results: {meta_r["label"]}</p>', unsafe_allow_html=True)
 
-        # Convergence summary
-        sum_col1, sum_col2 = st.columns(2)
+        # Summary boxes: Convergence X, Convergence Y, Best Parameter
+        sum_col1, sum_col2, sum_col3 = st.columns(3)
         with sum_col1:
             if scan_result.convergence_index_x is not None:
                 cv = scan_result.points[scan_result.convergence_index_x].param_value
@@ -495,6 +795,28 @@ def run_scanner_page():
                 </div>
                 """, unsafe_allow_html=True)
 
+        with sum_col3:
+            if scan_result.best_combined_index is not None:
+                best_pt = scan_result.points[scan_result.best_combined_index]
+                best_combined = best_pt.avg_morans_i_x + best_pt.avg_morans_i_y
+                st.markdown(f"""
+                <div class="stat-box" style="border-left: 4px solid #2ecc71;">
+                    <div class="stat-label">Best Parameter (Lowest Combined Moran's I)</div>
+                    <div class="stat-value" style="color: #27ae60;">{meta_r['label']} = {best_pt.param_value:.1f}{meta_r['unit']}</div>
+                    <div style="font-size: 0.85rem; color: #555; margin-top: 0.3rem;">
+                        Combined: <strong>{best_combined:.4f}</strong><br>
+                        X: {best_pt.avg_morans_i_x:.4f} | Y: {best_pt.avg_morans_i_y:.4f}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="stat-box" style="border-left: 4px solid #2ecc71;">
+                    <div class="stat-label">Best Parameter</div>
+                    <div class="stat-value">No data</div>
+                </div>
+                """, unsafe_allow_html=True)
+
         # Full results chart
         fig = create_scan_results_figure(scan_result)
         st.plotly_chart(fig, use_container_width=True)
@@ -504,11 +826,13 @@ def run_scanner_page():
             import pandas as pd
             rows = []
             for i, pt in enumerate(scan_result.points):
+                combined = pt.avg_morans_i_x + pt.avg_morans_i_y
                 row = {
                     f"{meta_r['label']}": pt.param_value,
                     "Avg Moran's I (X)": f"{pt.avg_morans_i_x:.4f}",
-                    "Std (X)": f"{pt.std_morans_i_x:.4f}",
                     "Avg Moran's I (Y)": f"{pt.avg_morans_i_y:.4f}",
+                    "Combined Score": f"{combined:.4f}",
+                    "Std (X)": f"{pt.std_morans_i_x:.4f}",
                     "Std (Y)": f"{pt.std_morans_i_y:.4f}",
                     "Avg Coverage %": f"{pt.avg_coverage:.1f}",
                     "Runs": pt.num_runs,
@@ -592,6 +916,11 @@ def main():
                     st.session_state.simulation_result = result
                     st.session_state.batch_result = None
                     st.session_state.run_count += 1
+                    csv_content = generate_single_run_csv(result)
+                    saved_path = save_log_file(csv_content, RESULTS_DIR, 'single', 1)
+                    st.session_state.last_saved_path = saved_path
+                    fig_screenshot = build_run_screenshot_figure(result)
+                    save_screenshot(fig_screenshot, saved_path)
             else:
                 # Batch run
                 progress_bar = st.progress(0)
@@ -605,13 +934,20 @@ def main():
                                                     progress_callback=update_progress)
 
                 st.session_state.batch_result = batch_result
-                st.session_state.simulation_result = batch_result.runs[-1]  # Last run for visualization
+                st.session_state.simulation_result = batch_result.runs[-1]
                 st.session_state.run_count += 1
 
                 progress_bar.empty()
                 status_text.empty()
 
-            st.success("Simulation complete!")
+                csv_content = generate_batch_csv(batch_result)
+                saved_path = save_log_file(csv_content, RESULTS_DIR, 'batch', num_runs)
+                st.session_state.last_saved_path = saved_path
+                fig_screenshot = build_run_screenshot_figure(batch_result.runs[-1], batch_result)
+                save_screenshot(fig_screenshot, saved_path)
+
+            fname = os.path.basename(st.session_state.last_saved_path)
+            st.success(f"Simulation complete! Log saved: `{fname}`")
 
         # Reset button
         if st.button("Reset", use_container_width=True):

@@ -1,3 +1,4 @@
+# Version: v3.1  |  Date: 2026-04-02
 """
 Parameter Scan Module
 Sweeps a single parameter across a range of values, running batch simulations
@@ -86,10 +87,13 @@ class ScanResult:
     gradient_y: Optional[np.ndarray] = None
     convergence_index_x: Optional[int] = None
     convergence_index_y: Optional[int] = None
+    best_combined_index: Optional[int] = None
 
     def finalize(self):
-        """Compute gradients and convergence after all points are collected."""
+        """Compute gradients, convergence, and best combined point after all points are collected."""
         if len(self.points) < 2:
+            if len(self.points) == 1:
+                self.best_combined_index = 0
             return
 
         self.param_values = np.array([p.param_value for p in self.points])
@@ -101,6 +105,9 @@ class ScanResult:
 
         self.convergence_index_x = detect_convergence(self.gradient_x)
         self.convergence_index_y = detect_convergence(self.gradient_y)
+
+        combined = self.morans_i_x_values + self.morans_i_y_values
+        self.best_combined_index = int(np.argmin(combined))
 
 
 def compute_gradient(values: np.ndarray, param_values: np.ndarray) -> np.ndarray:
