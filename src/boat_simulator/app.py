@@ -660,12 +660,12 @@ def run_scanner_page():
         meta = SCANNABLE_PARAMS[param_name]
 
         start_val = st.number_input(
-            f"Start ({meta['unit'].strip()})", min_value=meta['min'], max_value=meta['max'],
-            value=meta['min'], step=meta['default_step'], key="scan_start",
+            f"Start ({meta['unit'].strip()}) (default 5)", min_value=meta['min'], max_value=meta['max'],
+            value=meta.get('default_start', 5.0), step=meta['default_step'], key="scan_start",
         )
         stop_val = st.number_input(
-            f"Stop ({meta['unit'].strip()})", min_value=meta['min'], max_value=meta['max'],
-            value=meta['max'], step=meta['default_step'], key="scan_stop",
+            f"Stop ({meta['unit'].strip()}) (default 20)", min_value=meta['min'], max_value=meta['max'],
+            value=meta.get('default_stop', 20.0), step=meta['default_step'], key="scan_stop",
         )
 
     with scan_col2:
@@ -676,7 +676,7 @@ def run_scanner_page():
             key="scan_step",
         )
         runs_per = st.number_input(
-            "Runs per Standpoint", min_value=5, max_value=200, value=50, step=5,
+            "Runs per Standpoint (default 10)", min_value=5, max_value=1000, value=10, step=5,
             key="scan_runs_per_standpoint",
             help="Number of simulations at each parameter value for statistical confidence",
         )
@@ -871,31 +871,31 @@ def main():
         st.header("Simulation Parameters")
 
         st.subheader("Pool Dimensions")
-        st.number_input("Pool Width (m)", min_value=1.0, max_value=100.0, value=12.5,
+        st.number_input("Pool Width (m) (default 12.5)", min_value=5.0, max_value=1000.0, value=12.5,
                        step=0.5, key="pool_width")
-        st.number_input("Pool Height (m)", min_value=1.0, max_value=100.0, value=25.0,
+        st.number_input("Pool Height (m) (default 25)", min_value=5.0, max_value=1000.0, value=25.0,
                        step=0.5, key="pool_height")
 
         st.subheader("Movement Parameters")
-        st.number_input("Initial Angle", min_value=0.0, max_value=360.0, value=45.0,
+        st.number_input("Initial Angle (deg) (default 45)", min_value=0.0, max_value=360.0, value=45.0,
                        step=5.0, key="alpha")
-        st.number_input("Min Delta Angle", min_value=0.0, max_value=90.0, value=25.0,
+        st.number_input("Min Delta (deg) (default 20)", min_value=0.0, max_value=270.0, value=20.0,
                        step=5.0, key="min_delta")
-        st.number_input("Max Delta Angle", min_value=0.0, max_value=90.0, value=45.0,
+        st.number_input("Max Delta (deg) (default 45)", min_value=0.0, max_value=270.0, value=45.0,
                        step=5.0, key="max_delta")
-        st.number_input("Cruise Speed (m/s)", min_value=0.01, max_value=2.0, value=0.2,
+        st.number_input("Cruise Speed (m/s) (default 0.2)", min_value=0.1, max_value=10.0, value=0.2,
                        step=0.05, key="cruise_speed")
 
         st.subheader("Edge Behavior")
-        st.number_input("Slowdown Factor", min_value=0.1, max_value=1.0, value=0.5,
+        st.number_input("Slowdown Factor (default 0.5)", min_value=0.1, max_value=1.0, value=0.5,
                        step=0.1, key="slowdown_factor")
-        st.number_input("Edge Buffer (m)", min_value=0.1, max_value=5.0, value=0.5,
+        st.number_input("Edge Buffer (m) (default 0.5)", min_value=0.1, max_value=3.0, value=0.5,
                        step=0.1, key="edge_buffer")
 
         st.subheader("Sampling")
-        st.number_input("Sample Interval (min)", min_value=1.0, max_value=60.0, value=10.0,
+        st.number_input("Sample Interval (min) (default 5)", min_value=1.0, max_value=60.0, value=5.0,
                        step=1.0, key="sample_interval")
-        st.number_input("Max Samples", min_value=1, max_value=50, value=5,
+        st.number_input("Max Samples (default 5)", min_value=1, max_value=100, value=5,
                        step=1, key="max_samples")
 
         st.markdown("---")
