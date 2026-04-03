@@ -1,4 +1,4 @@
-# Version: v3.2  |  Date: 2026-04-03
+# Version: v3.3  |  Date: 2026-04-03
 """
 Boat Simulator - Streamlit Application
 A simulation tool for modeling a robotic boat performing correlated random walk
@@ -19,8 +19,13 @@ from simulation.batch import run_batch_simulation
 from simulation.parameter_scan import (
     ScanConfig, ScanResult, SCANNABLE_PARAMS, run_parameter_scan
 )
+from simulation.convergence_analysis import ConvergencePoint, run_convergence_analysis
 from visualization.plotting import create_path_figure, create_animated_figure, create_coverage_heatmap
-from export.csv_logger import generate_single_run_csv, generate_batch_csv, generate_scan_csv, get_csv_filename, save_log_file
+from export.csv_logger import (
+    generate_single_run_csv, generate_batch_csv,
+    generate_scan_csv, generate_convergence_csv,
+    get_csv_filename, save_log_file,
+)
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
@@ -103,6 +108,7 @@ def init_session_state():
         'run_count': 0,
         'app_mode': 'simulator',
         'last_saved_path': None,
+        'convergence_results': None,
         'boat_width': 0.6,
         'stop_time': 2.0,
         'acceleration': 0.1,
@@ -332,13 +338,39 @@ def build_run_screenshot_figure(result, batch_result=None) -> go.Figure:
             f"{result.total_time / 60:.1f}",
         ]
 
+    # Append full parameter set to stats table (p = result.params, already defined above)
+    labels += [
+        "", "─── Run Parameters ───",
+        "Pool Width (m)", "Pool Height (m)",
+        "Initial Angle (°)", "Min Delta (°)", "Max Delta (°)",
+        "Cruise Speed (m/s)", "Slowdown Factor", "Edge Buffer (m)",
+        "Boat Width (m)", "Stop Time (s)", "Accel. (m/s²)",
+        "Sample Interval (min)", "Max Samples",
+    ]
+    values += [
+        "", "",
+        str(p.pool_width), str(p.pool_height),
+        f"{p.alpha}°", f"{p.min_delta}°", f"{p.max_delta}°",
+        f"{p.cruise_speed} m/s", str(p.slowdown_factor), f"{p.edge_buffer} m",
+        f"{p.boat_width} m", f"{p.stop_time} s", f"{p.acceleration} m/s²",
+        f"{p.sample_interval} min", str(p.max_samples),
+    ]
+    row_colors = []
+    for lbl in labels:
+        if lbl == "":
+            row_colors.append('#d0f0c0')
+        elif lbl.startswith("─"):
+            row_colors.append('#dce8f0')
+        else:
+            row_colors.append('#f5f7fa')
+
     fig.add_trace(go.Table(
         header=dict(values=["Metric", "Value"],
                     fill_color='#1e3a5f', font=dict(color='white', size=13),
                     align='left'),
         cells=dict(values=[labels, values],
-                   fill_color=[['#f5f7fa', '#e4e8ec'] * (len(labels) // 2 + 1)],
-                   align='left', font=dict(size=12)),
+                   fill_color=[[c for c in row_colors], [c for c in row_colors]],
+                   align='left', font=dict(size=12), height=22),
     ), row=1, col=2)
 
     run_type = f"Batch ({batch_result.statistics.num_runs} runs)" if batch_result else "Single Run"
@@ -379,20 +411,27 @@ def build_sweep_screenshot_figure(scan_result: ScanResult) -> go.Figure:
     pv = scan_result.param_values
     mi_x = scan_result.morans_i_x_values
     mi_y = scan_result.morans_i_y_values
+    n_runs = scan_result.config.runs_per_standpoint
     std_x = np.array([p.std_morans_i_x for p in scan_result.points])
     std_y = np.array([p.std_morans_i_y for p in scan_result.points])
+    ci_x = 1.96 * std_x / np.sqrt(max(n_runs, 1))
+    ci_y = 1.96 * std_y / np.sqrt(max(n_runs, 1))
+    null_baseline = -1.0 / max(scan_result.fixed_params.max_samples - 1, 1)
 
-    # Top-left: Moran's I lines
+    # Top-left: Moran's I lines with 95% CI
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X) ±95% CI",
         line=dict(color='#e74c3c', width=2), marker=dict(size=6),
-        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+        error_y=dict(type='data', array=ci_x, visible=True, color='rgba(231,76,60,0.3)'),
     ), row=1, col=1)
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y) ±95% CI",
         line=dict(color='#3498db', width=2), marker=dict(size=6),
-        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+        error_y=dict(type='data', array=ci_y, visible=True, color='rgba(52,152,219,0.3)'),
     ), row=1, col=1)
+    fig.add_hline(y=null_baseline, line_dash="dot", line_color="#888",
+                  annotation_text=f"Null E[I]={null_baseline:.3f}",
+                  annotation_font_color="#888", row=1, col=1)
 
     # Bottom-left: Gradient
     if scan_result.gradient_x is not None:
@@ -472,10 +511,31 @@ def build_sweep_screenshot_figure(scan_result: ScanResult) -> go.Figure:
         cv_y_val,
     ]
 
+    # Append fixed parameter set to summary table
+    fp = scan_result.fixed_params
+    table_labels += [
+        "", "─── Fixed Parameters ───",
+        "Pool Width (m)", "Pool Height (m)",
+        "Initial Angle (°)", "Min Delta (°)", "Max Delta (°)",
+        "Cruise Speed (m/s)", "Slowdown Factor", "Edge Buffer (m)",
+        "Boat Width (m)", "Stop Time (s)", "Accel. (m/s²)",
+        "Sample Interval (min)", "Max Samples",
+    ]
+    table_values += [
+        "", "",
+        str(fp.pool_width), str(fp.pool_height),
+        f"{fp.alpha}°", f"{fp.min_delta}°", f"{fp.max_delta}°",
+        f"{fp.cruise_speed} m/s", str(fp.slowdown_factor), f"{fp.edge_buffer} m",
+        f"{fp.boat_width} m", f"{fp.stop_time} s", f"{fp.acceleration} m/s²",
+        f"{fp.sample_interval} min", str(fp.max_samples),
+    ]
+
     row_colors = []
     for lbl in table_labels:
         if lbl == "":
             row_colors.append('#d0f0c0')  # light green separator
+        elif lbl.startswith("─"):
+            row_colors.append('#dce8f0')  # light blue section header
         elif lbl.startswith("Best"):
             row_colors.append('#e8f8e8')
         elif lbl.startswith("Convergence"):
@@ -523,21 +583,32 @@ def create_scan_results_figure(scan_result: ScanResult) -> go.Figure:
     pv = scan_result.param_values
     mi_x = scan_result.morans_i_x_values
     mi_y = scan_result.morans_i_y_values
+    n_runs = scan_result.config.runs_per_standpoint
     std_x = np.array([p.std_morans_i_x for p in scan_result.points])
     std_y = np.array([p.std_morans_i_y for p in scan_result.points])
+    # 95% CI half-width = 1.96 * SE = 1.96 * std / sqrt(n_runs)
+    ci_x = 1.96 * std_x / np.sqrt(max(n_runs, 1))
+    ci_y = 1.96 * std_y / np.sqrt(max(n_runs, 1))
+    # Null baseline: expected Moran's I under complete spatial randomness
+    null_baseline = -1.0 / max(scan_result.fixed_params.max_samples - 1, 1)
 
-    # Top plot: Moran's I with error bands
+    # Top plot: Moran's I with 95% CI error bars
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X) ±95% CI",
         line=dict(color='#e74c3c', width=2), marker=dict(size=6),
-        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+        error_y=dict(type='data', array=ci_x, visible=True, color='rgba(231,76,60,0.3)'),
     ), row=1, col=1)
 
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y) ±95% CI",
         line=dict(color='#3498db', width=2), marker=dict(size=6),
-        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+        error_y=dict(type='data', array=ci_y, visible=True, color='rgba(52,152,219,0.3)'),
     ), row=1, col=1)
+
+    # Null baseline line: E[I] = -1/(n_samples-1) under complete spatial randomness
+    fig.add_hline(y=null_baseline, line_dash="dot", line_color="#888",
+                  annotation_text=f"Null E[I]={null_baseline:.3f} (n={scan_result.fixed_params.max_samples})",
+                  annotation_font_color="#888", row=1, col=1)
 
     # Bottom plot: Gradient
     if scan_result.gradient_x is not None:
@@ -607,18 +678,21 @@ def create_live_scan_figure(points, param_name, param_values_so_far):
     pv = [p.param_value for p in points]
     mi_x = [p.avg_morans_i_x for p in points]
     mi_y = [p.avg_morans_i_y for p in points]
-    std_x = [p.std_morans_i_x for p in points]
-    std_y = [p.std_morans_i_y for p in points]
+    n_runs = points[0].num_runs if points else 1
+    std_x = np.array([p.std_morans_i_x for p in points])
+    std_y = np.array([p.std_morans_i_y for p in points])
+    ci_x = 1.96 * std_x / np.sqrt(max(n_runs, 1))
+    ci_y = 1.96 * std_y / np.sqrt(max(n_runs, 1))
 
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X)",
+        x=pv, y=mi_x, mode='lines+markers', name="Moran's I (X) ±95% CI",
         line=dict(color='#e74c3c', width=2), marker=dict(size=7),
-        error_y=dict(type='data', array=std_x, visible=True, color='rgba(231,76,60,0.3)'),
+        error_y=dict(type='data', array=ci_x, visible=True, color='rgba(231,76,60,0.3)'),
     ))
     fig.add_trace(go.Scatter(
-        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y)",
+        x=pv, y=mi_y, mode='lines+markers', name="Moran's I (Y) ±95% CI",
         line=dict(color='#3498db', width=2), marker=dict(size=7),
-        error_y=dict(type='data', array=std_y, visible=True, color='rgba(52,152,219,0.3)'),
+        error_y=dict(type='data', array=ci_y, visible=True, color='rgba(52,152,219,0.3)'),
     ))
 
     # Mark current best point (lowest combined)
@@ -641,6 +715,229 @@ def create_live_scan_figure(points, param_name, param_values_so_far):
         height=400,
         plot_bgcolor='white',
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
+    return fig
+
+
+def create_convergence_figure(points):
+    """
+    Plot Mean Moran's I ± 95% CI vs N (top) and Standard Error vs N (bottom).
+    A horizontal dashed line shows the null baseline E[I] = -1/(n_samples-1).
+    When the CI band is entirely BELOW the null baseline, the result is
+    statistically significantly better than random (95% confidence).
+    """
+    if not points:
+        return go.Figure()
+
+    ns            = [p.n          for p in points]
+    null_baseline = points[0].null_baseline
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        subplot_titles=(
+            "Mean Moran's I ± 95% Confidence Interval vs Number of Runs",
+            "Standard Error vs Number of Runs  (narrows as 1/√N)",
+        ),
+        vertical_spacing=0.18,
+        row_heights=[0.6, 0.4],
+    )
+
+    for axis, color, name in [
+        ('x', '#e74c3c', "Moran's I (X-axis)"),
+        ('y', '#3498db', "Moran's I (Y-axis)"),
+    ]:
+        means      = [getattr(p, f'mean_{axis}')     for p in points]
+        ci_lowers  = [getattr(p, f'ci_lower_{axis}') for p in points]
+        ci_uppers  = [getattr(p, f'ci_upper_{axis}') for p in points]
+        ses        = [getattr(p, f'se_{axis}')        for p in points]
+
+        # 95% CI shaded band
+        fig.add_trace(go.Scatter(
+            x=ns + ns[::-1],
+            y=ci_uppers + ci_lowers[::-1],
+            fill='toself', fillcolor=color, opacity=0.15,
+            line=dict(width=0), showlegend=False, hoverinfo='skip',
+        ), row=1, col=1)
+
+        # Mean line
+        fig.add_trace(go.Scatter(
+            x=ns, y=means, mode='lines+markers',
+            name=name, line=dict(color=color, width=2), marker=dict(size=6),
+        ), row=1, col=1)
+
+        # SE line
+        fig.add_trace(go.Scatter(
+            x=ns, y=ses, mode='lines+markers',
+            name=f'SE ({axis.upper()})', line=dict(color=color, width=2, dash='dot'),
+            marker=dict(size=5), showlegend=True,
+        ), row=2, col=1)
+
+    # Null baseline (top chart only)
+    fig.add_hline(
+        y=null_baseline, line_dash="dash", line_color="#e67e22", line_width=1.5,
+        annotation_text=f"Null E[I] = {null_baseline:.3f}  (pure random baseline)",
+        annotation_font_color="#e67e22",
+        row=1, col=1,
+    )
+
+    fig.update_xaxes(title_text="Number of Runs (N)", row=2, col=1)
+    fig.update_yaxes(title_text="Moran's I", row=1, col=1)
+    fig.update_yaxes(title_text="Standard Error", row=2, col=1)
+    fig.update_layout(
+        height=700,
+        plot_bgcolor='white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+    )
+    return fig
+
+
+def build_convergence_screenshot_figure(points, params, max_n: int, seed: int) -> go.Figure:
+    """
+    Build composite screenshot figure for a convergence analysis run:
+    - Left column (2 rows): Mean ± 95% CI chart (top) + SE chart (bottom)
+    - Right column (spans both rows): analysis config + final results + full parameters table
+    """
+    fig = make_subplots(
+        rows=2, cols=2,
+        column_widths=[0.65, 0.35],
+        row_heights=[0.60, 0.40],
+        vertical_spacing=0.12,
+        horizontal_spacing=0.08,
+        subplot_titles=(
+            "Mean Moran's I ± 95% Confidence Interval vs N",
+            "Analysis Config & Parameters",
+            "Standard Error vs N  (narrows as 1/√N)",
+            "",
+        ),
+        specs=[
+            [{"type": "xy"}, {"type": "table", "rowspan": 2}],
+            [{"type": "xy"}, None],
+        ],
+    )
+
+    if not points:
+        return fig
+
+    ns        = [pt.n for pt in points]
+    null_b    = points[0].null_baseline
+
+    for axis, color, name in [
+        ('x', '#e74c3c', "Moran's I (X)"),
+        ('y', '#3498db', "Moran's I (Y)"),
+    ]:
+        means     = [getattr(pt, f'mean_{axis}')     for pt in points]
+        ci_lowers = [getattr(pt, f'ci_lower_{axis}') for pt in points]
+        ci_uppers = [getattr(pt, f'ci_upper_{axis}') for pt in points]
+        ses       = [getattr(pt, f'se_{axis}')       for pt in points]
+
+        # CI shaded band (top chart)
+        fig.add_trace(go.Scatter(
+            x=ns + ns[::-1], y=ci_uppers + ci_lowers[::-1],
+            fill='toself', fillcolor=color, opacity=0.15,
+            line=dict(width=0), showlegend=False, hoverinfo='skip',
+        ), row=1, col=1)
+        # Mean line (top chart)
+        fig.add_trace(go.Scatter(
+            x=ns, y=means, mode='lines+markers',
+            name=name, line=dict(color=color, width=2), marker=dict(size=5),
+        ), row=1, col=1)
+        # SE line (bottom chart)
+        fig.add_trace(go.Scatter(
+            x=ns, y=ses, mode='lines+markers',
+            name=f'SE ({axis.upper()})', line=dict(color=color, width=2, dash='dot'),
+            marker=dict(size=4),
+        ), row=2, col=1)
+
+    # Null baseline
+    fig.add_hline(y=null_b, line_dash="dash", line_color="#e67e22", line_width=1.5,
+                  annotation_text=f"Null E[I] = {null_b:.3f}",
+                  annotation_font_color="#e67e22", row=1, col=1)
+
+    # ── Parameters + summary table ─────────────────────────────────────────
+    last = points[-1]
+    verdict_x = "PROVEN"     if last.ci_upper_x < null_b else "NOT PROVEN"
+    verdict_y = "PROVEN"     if last.ci_upper_y < null_b else "NOT PROVEN"
+    vcolor_x  = '#27ae60'    if verdict_x == "PROVEN" else '#e74c3c'
+    vcolor_y  = '#27ae60'    if verdict_y == "PROVEN" else '#e74c3c'
+
+    tbl_labels = [
+        "─── Analysis Config ───",
+        "Total Runs (N)", "Random Seed",
+        "Null Baseline E[I]", "Checkpoints",
+        "",
+        f"─── Final Results (N={last.n}) ───",
+        "Mean I(X)", "95% CI (X)", "SE (X)",
+        "Mean I(Y)", "95% CI (Y)", "SE (Y)",
+        "Verdict (X)", "Verdict (Y)",
+        "",
+        "─── Fixed Parameters ───",
+        "Pool Width (m)", "Pool Height (m)",
+        "Initial Angle (°)", "Min Delta (°)", "Max Delta (°)",
+        "Cruise Speed (m/s)", "Slowdown Factor", "Edge Buffer (m)",
+        "Boat Width (m)", "Stop Time (s)", "Accel. (m/s²)",
+        "Sample Interval (min)", "Max Samples",
+    ]
+    tbl_values = [
+        "",
+        str(max_n), str(seed),
+        f"{null_b:.4f}", str(len(points)),
+        "",
+        "",
+        f"{last.mean_x:.4f}",
+        f"[{last.ci_lower_x:.4f}, {last.ci_upper_x:.4f}]",
+        f"{last.se_x:.4f}",
+        f"{last.mean_y:.4f}",
+        f"[{last.ci_lower_y:.4f}, {last.ci_upper_y:.4f}]",
+        f"{last.se_y:.4f}",
+        verdict_x, verdict_y,
+        "",
+        "",
+        str(params.pool_width), str(params.pool_height),
+        f"{params.alpha}°", f"{params.min_delta}°", f"{params.max_delta}°",
+        f"{params.cruise_speed} m/s", str(params.slowdown_factor), f"{params.edge_buffer} m",
+        f"{params.boat_width} m", f"{params.stop_time} s", f"{params.acceleration} m/s²",
+        f"{params.sample_interval} min", str(params.max_samples),
+    ]
+
+    row_colors_lbl = []
+    row_colors_val = []
+    for i, lbl in enumerate(tbl_labels):
+        val = tbl_values[i]
+        if lbl == "":
+            row_colors_lbl.append('#d0f0c0')
+            row_colors_val.append('#d0f0c0')
+        elif lbl.startswith("─"):
+            row_colors_lbl.append('#dce8f0')
+            row_colors_val.append('#dce8f0')
+        elif lbl == "Verdict (X)":
+            row_colors_lbl.append('#f5f7fa')
+            row_colors_val.append('#c8f0c8' if val == "PROVEN" else '#fde8e8')
+        elif lbl == "Verdict (Y)":
+            row_colors_lbl.append('#f5f7fa')
+            row_colors_val.append('#c8f0c8' if val == "PROVEN" else '#fde8e8')
+        else:
+            row_colors_lbl.append('#f5f7fa')
+            row_colors_val.append('#f5f7fa')
+
+    fig.add_trace(go.Table(
+        header=dict(values=["Metric", "Value"],
+                    fill_color='#1e3a5f', font=dict(color='white', size=13), align='left'),
+        cells=dict(
+            values=[tbl_labels, tbl_values],
+            fill_color=[row_colors_lbl, row_colors_val],
+            align='left', font=dict(size=12), height=24,
+        ),
+    ), row=1, col=2)
+
+    fig.update_xaxes(title_text="Number of Runs (N)", row=1, col=1)
+    fig.update_xaxes(title_text="Number of Runs (N)", row=2, col=1)
+    fig.update_yaxes(title_text="Moran's I", row=1, col=1)
+    fig.update_yaxes(title_text="Standard Error", row=2, col=1)
+    fig.update_layout(
+        title=dict(text="Convergence Analysis — Full Report", font=dict(size=18)),
+        height=900,
+        plot_bgcolor='white',
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.3),
     )
     return fig
 
@@ -859,6 +1156,114 @@ def run_scanner_page():
             use_container_width=True,
         )
 
+    # ── Convergence Validator ────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<p class="section-header">📊 Convergence Validator</p>', unsafe_allow_html=True)
+    st.markdown(
+        "Run increasing-N batches at the **current sidebar parameters** to determine how many "
+        "simulations are needed before Moran's I stabilises. "
+        "The top chart shows mean ± 95% CI narrowing as N grows. "
+        "The bottom chart shows Standard Error (SE) shrinking as 1/√N. "
+        "\n\n"
+        "🟠 The **orange dashed line** is the null baseline E[I] = −1/(n−1) — the value expected under "
+        "complete spatial randomness. "
+        "**When the entire CI band is below that line, the result is statistically "
+        "significantly better than random (95% confidence).**"
+    )
+
+    conv_col1, conv_col2 = st.columns([1, 2])
+    with conv_col1:
+        conv_max_n = st.number_input(
+            "Max N (total runs to simulate)",
+            min_value=10, max_value=1000, value=200, step=10,
+            key="conv_max_n",
+            help="The analysis runs N simulations once, then computes statistics at increasing checkpoints.",
+        )
+        conv_seed = st.number_input(
+            "Random Seed (default 42)",
+            min_value=0, max_value=99999, value=42, step=1,
+            key="conv_seed",
+        )
+
+    with conv_col2:
+        n_samples = st.session_state.get("max_samples", 20)
+        null_preview = -1.0 / max(n_samples - 1, 1)
+        st.info(
+            f"**Current max_samples = {n_samples}** → null baseline = {null_preview:.4f}\n\n"
+            f"Recommended: use at least **20–30 samples** for Moran's I to be meaningful. "
+            f"With n={n_samples}, you need CI_upper < {null_preview:.4f} to claim better-than-random."
+        )
+
+    if st.button("▶ Run Convergence Analysis", type="primary", use_container_width=True,
+                 key="run_convergence_btn"):
+        params = create_params_from_inputs()
+
+        conv_progress = st.progress(0)
+        conv_status = st.empty()
+
+        def conv_progress_cb(done, total):
+            conv_progress.progress(done / total)
+            conv_status.text(f"Running simulation {done}/{total}…")
+
+        conv_points = run_convergence_analysis(
+            params,
+            max_n=int(conv_max_n),
+            seed=int(conv_seed),
+            progress_callback=conv_progress_cb,
+        )
+        st.session_state.convergence_results = conv_points
+
+        conv_progress.empty()
+        conv_status.empty()
+
+        # Auto-save CSV
+        conv_csv = generate_convergence_csv(conv_points, params, int(conv_max_n), int(conv_seed))
+        saved_path = save_log_file(conv_csv, RESULTS_DIR, 'convergence', int(conv_max_n))
+        st.session_state.last_saved_path = saved_path
+
+        # Auto-save screenshot (PNG alongside CSV) — uses full composite figure with params table
+        conv_fig_save = build_convergence_screenshot_figure(conv_points, params, int(conv_max_n), int(conv_seed))
+        save_screenshot(conv_fig_save, saved_path)
+
+        fname = os.path.basename(saved_path)
+        st.success(f"Convergence analysis complete — {len(conv_points)} checkpoints. Log saved: `{fname}`")
+        st.rerun()
+
+    if st.session_state.convergence_results is not None:
+        conv_points = st.session_state.convergence_results
+        conv_fig = create_convergence_figure(conv_points)
+        st.plotly_chart(conv_fig, use_container_width=True)
+
+        # Summary table of final checkpoint
+        last = conv_points[-1]
+        null_b = last.null_baseline
+        ci_x_ok = last.ci_upper_x < null_b
+        ci_y_ok = last.ci_upper_y < null_b
+        verdict_x = "✅ Significantly below null (95% CI)" if ci_x_ok else "⚠️ CI overlaps null baseline"
+        verdict_y = "✅ Significantly below null (95% CI)" if ci_y_ok else "⚠️ CI overlaps null baseline"
+
+        with st.expander(f"📋 Final Checkpoint Summary (N = {last.n})"):
+            import pandas as pd
+            summary_rows = []
+            for pt in conv_points:
+                summary_rows.append({
+                    "N": pt.n,
+                    "Mean I(X)": f"{pt.mean_x:.4f}",
+                    "95% CI (X)": f"[{pt.ci_lower_x:.4f}, {pt.ci_upper_x:.4f}]",
+                    "SE (X)": f"{pt.se_x:.4f}",
+                    "Mean I(Y)": f"{pt.mean_y:.4f}",
+                    "95% CI (Y)": f"[{pt.ci_lower_y:.4f}, {pt.ci_upper_y:.4f}]",
+                    "SE (Y)": f"{pt.se_y:.4f}",
+                    "Null E[I]": f"{pt.null_baseline:.4f}",
+                })
+            st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
+
+            st.markdown(f"""
+            **Null baseline:** {null_b:.4f}
+            | **X verdict:** {verdict_x}
+            | **Y verdict:** {verdict_y}
+            """)
+
 
 def main():
     """Main application entry point."""
@@ -909,8 +1314,8 @@ def main():
         st.subheader("Sampling")
         st.number_input("Sample Interval (min) (default 5)", min_value=1.0, max_value=60.0, value=5.0,
                        step=1.0, key="sample_interval")
-        st.number_input("Max Samples (default 5)", min_value=1, max_value=100, value=5,
-                       step=1, key="max_samples")
+        st.number_input("Max Samples (default 20)", min_value=1, max_value=5000, value=20,
+                       step=5, key="max_samples")
 
         st.markdown("---")
 

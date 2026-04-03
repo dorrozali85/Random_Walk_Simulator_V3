@@ -1,4 +1,4 @@
-# Version: v3.1  |  Date: 2026-04-02
+# Version: v3.3  |  Date: 2026-04-03
 """
 CSV Export Module
 Generates CSV files for single runs and batch runs per specification.
@@ -32,6 +32,9 @@ def _format_params_section(params, scan_config=None) -> list:
     rows.append(['Cruise Speed (m/s)', params.cruise_speed])
     rows.append(['Slowdown Factor', params.slowdown_factor])
     rows.append(['Edge Buffer (m)', params.edge_buffer])
+    rows.append(['Boat Width (m)', params.boat_width])
+    rows.append(['Stop Time (s)', params.stop_time])
+    rows.append(['Acceleration (m/s²)', params.acceleration])
 
     if scan_config is not None:
         rows.append([])
@@ -243,6 +246,69 @@ def generate_scan_csv(scan_result) -> str:
         writer.writerow(['Best Parameter', 'Not found'])
 
     for row in _format_params_section(scan_result.fixed_params, scan_config=scan_result.config):
+        writer.writerow(row)
+
+    return output.getvalue()
+
+
+def generate_convergence_csv(points, params, max_n: int, seed: int) -> str:
+    """
+    Generate CSV content for a convergence analysis run.
+
+    Format:
+    - Analysis config header (max_n, seed, null_baseline)
+    - Data table: one row per checkpoint (N, mean, CI, SE for X and Y)
+    - Verdict at final checkpoint (CI below null = proven)
+    - Full simulation parameters section at end
+    """
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    null_b = points[0].null_baseline if points else 0.0
+
+    writer.writerow(['=== CONVERGENCE ANALYSIS ==='])
+    writer.writerow(['Max N (total runs)', max_n])
+    writer.writerow(['Random Seed', seed])
+    writer.writerow(['Null Baseline E[I]', f"{null_b:.6f}"])
+    writer.writerow(['Checkpoints computed', len(points)])
+    writer.writerow([])
+
+    # Data table
+    writer.writerow([
+        'N',
+        'Mean_I_X', 'CI_Lower_X', 'CI_Upper_X', 'SE_X', 'Std_X',
+        'Mean_I_Y', 'CI_Lower_Y', 'CI_Upper_Y', 'SE_Y', 'Std_Y',
+        'Null_Baseline', 'CI_X_Below_Null', 'CI_Y_Below_Null',
+    ])
+    for pt in points:
+        ci_x_ok = 'YES' if pt.ci_upper_x < null_b else 'NO'
+        ci_y_ok = 'YES' if pt.ci_upper_y < null_b else 'NO'
+        writer.writerow([
+            pt.n,
+            f"{pt.mean_x:.6f}", f"{pt.ci_lower_x:.6f}", f"{pt.ci_upper_x:.6f}",
+            f"{pt.se_x:.6f}",   f"{pt.std_x:.6f}",
+            f"{pt.mean_y:.6f}", f"{pt.ci_lower_y:.6f}", f"{pt.ci_upper_y:.6f}",
+            f"{pt.se_y:.6f}",   f"{pt.std_y:.6f}",
+            f"{pt.null_baseline:.6f}",
+            ci_x_ok, ci_y_ok,
+        ])
+
+    # Verdict at final checkpoint
+    if points:
+        last = points[-1]
+        writer.writerow([])
+        writer.writerow(['--- FINAL VERDICT (N =', last.n, ') ---'])
+        writer.writerow(['Null Baseline', f"{null_b:.6f}"])
+        writer.writerow(['Final Mean I(X)', f"{last.mean_x:.6f}",
+                         '95% CI', f"[{last.ci_lower_x:.6f}, {last.ci_upper_x:.6f}]",
+                         'Verdict', 'PROVEN (CI below null)' if last.ci_upper_x < null_b else 'NOT PROVEN'])
+        writer.writerow(['Final Mean I(Y)', f"{last.mean_y:.6f}",
+                         '95% CI', f"[{last.ci_lower_y:.6f}, {last.ci_upper_y:.6f}]",
+                         'Verdict', 'PROVEN (CI below null)' if last.ci_upper_y < null_b else 'NOT PROVEN'])
+        writer.writerow(['Final SE(X)', f"{last.se_x:.6f}",
+                         'Final SE(Y)', f"{last.se_y:.6f}"])
+
+    for row in _format_params_section(params):
         writer.writerow(row)
 
     return output.getvalue()
