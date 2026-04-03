@@ -1,4 +1,4 @@
-# Version: v3.1  |  Date: 2026-04-02
+# Version: v3.2  |  Date: 2026-04-03
 """
 Boat Simulator - Streamlit Application
 A simulation tool for modeling a robotic boat performing correlated random walk
@@ -103,6 +103,9 @@ def init_session_state():
         'run_count': 0,
         'app_mode': 'simulator',
         'last_saved_path': None,
+        'boat_width': 0.6,
+        'stop_time': 2.0,
+        'acceleration': 0.1,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -121,7 +124,10 @@ def create_params_from_inputs() -> SimulationParams:
         max_samples=st.session_state.max_samples,
         cruise_speed=st.session_state.cruise_speed,
         slowdown_factor=st.session_state.slowdown_factor,
-        edge_buffer=st.session_state.edge_buffer
+        edge_buffer=st.session_state.edge_buffer,
+        boat_width=st.session_state.boat_width,
+        stop_time=st.session_state.stop_time,
+        acceleration=st.session_state.acceleration,
     )
 
 
@@ -892,6 +898,14 @@ def main():
         st.number_input("Edge Buffer (m) (default 0.5)", min_value=0.1, max_value=3.0, value=0.5,
                        step=0.1, key="edge_buffer")
 
+        st.subheader("Wall Behaviour")
+        st.number_input("Boat Width (m) (default 0.6)", min_value=0.1, max_value=2.0, value=0.6,
+                       step=0.1, key="boat_width")
+        st.number_input("Stop Time (s) (default 2.0)", min_value=0.0, max_value=10.0, value=2.0,
+                       step=0.5, key="stop_time")
+        st.number_input("Acceleration (m/s²) (default 0.1)", min_value=0.01, max_value=2.0, value=0.1,
+                       step=0.01, key="acceleration")
+
         st.subheader("Sampling")
         st.number_input("Sample Interval (min) (default 5)", min_value=1.0, max_value=60.0, value=5.0,
                        step=1.0, key="sample_interval")
@@ -901,7 +915,7 @@ def main():
         st.markdown("---")
 
         st.subheader("Batch Settings")
-        num_runs = st.number_input("Number of Runs", min_value=1, max_value=100, value=1,
+        num_runs = st.number_input("Number of Runs", min_value=1, max_value=2000, value=1,
                                    step=1, key="num_runs")
 
         # Run button
