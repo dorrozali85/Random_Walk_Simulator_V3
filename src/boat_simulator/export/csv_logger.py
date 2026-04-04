@@ -48,15 +48,17 @@ def _format_params_section(params, scan_config=None) -> list:
     return rows
 
 
-def save_log_file(content: str, results_dir: str, run_type: str, num_iterations: int) -> str:
+def save_log_file(content: str, results_dir: str, run_type: str, num_iterations: int,
+                  label: str = '') -> str:
     """
     Save CSV content to results/ directory with a standardized filename.
 
-    Filename format: YYYYMMDD-NNN-IIII-type.csv
+    Filename format: YYYYMMDD-NNN-IIII-type[-label].csv
       YYYYMMDD       - date of run
       NNN            - run number for today (3 digits, counts existing files)
       IIII           - total simulations executed (4 digits)
-      type           - 'single', 'batch', or 'sweep'
+      type           - 'single', 'batch', 'sweep', or 'convergence'
+      label          - optional suffix (e.g. param name being swept)
 
     Returns the full path of the saved file.
     """
@@ -64,7 +66,8 @@ def save_log_file(content: str, results_dir: str, run_type: str, num_iterations:
     today = datetime.now().strftime('%Y%m%d')
     existing = [f for f in os.listdir(results_dir) if f.startswith(today) and f.endswith('.csv')]
     run_num = len(existing) + 1
-    filename = f"{today}-{run_num:03d}-{num_iterations:04d}-{run_type}.csv"
+    suffix = f"-{label}" if label else ''
+    filename = f"{today}-{run_num:03d}-{num_iterations:04d}-{run_type}{suffix}.csv"
     filepath = os.path.join(results_dir, filename)
     with open(filepath, 'w', newline='', encoding='utf-8') as f:
         f.write(content)

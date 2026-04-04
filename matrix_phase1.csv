@@ -1,0 +1,6 @@
+label,type,param_name,start,stop,step,runs_per_standpoint,num_runs,max_n,seed,pool_width,pool_height,alpha,min_delta,max_delta,cruise_speed,slowdown_factor,edge_buffer,boat_width,stop_time,acceleration,sample_interval,max_samples
+DEFAULTS,defaults,,,,,,,,42,12.5,25,45,20,90,0.2,0.5,0.5,0.6,2,0.1,5,20
+Sweep A - max_samples 6 to 30,sweep,max_samples,6,30,2,100,,,,,,,,,,,,,,,,
+Sweep B - sample_interval 1 to 10,sweep,sample_interval,1,10,1,100,,,,,,,,,,,,,,,,
+Sweep C - max_delta 20 to 180,sweep,max_delta,20,180,5,100,,,,,,,20,,,,,,,,,
+Sweep D - min_delta 20 to 90,sweep,min_delta,20,90,10,100,,,,,,,,,,,,,,,,
