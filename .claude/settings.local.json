@@ -6,7 +6,14 @@
       "Bash(DEST=\"C:/Users/dor_r/OneDrive/Desktop/maze_solver/@Roomba_project/Random_Walk_Simulator_V3\")",
       "Bash(__NEW_LINE_fe1c7e001bac5b61__ cp:*)",
       "Bash(cp \"$SRC/simulation/engine.py\" \"$SRC/simulation/batch.py\" \"$SRC/simulation/statistics.py\" \"$SRC/simulation/__init__.py\" \"$DEST/src/boat_simulator/simulation/\")",
-      "Bash(cp \"$SRC/visualization/plotting.py\" \"$SRC/visualization/__init__.py\" \"$DEST/src/boat_simulator/visualization/\")"
+      "Bash(cp \"$SRC/visualization/plotting.py\" \"$SRC/visualization/__init__.py\" \"$DEST/src/boat_simulator/visualization/\")",
+      "Bash(gh --version)",
+      "Bash(pandoc \"C:/Users/dor_r/OneDrive/מסמכים/@פרוייקט גמר/7. קוד/Random_Walk_Simulator_V2/comprehensive_boat_simulation_analysis.docx\" -o /tmp/boat_analysis.md)",
+      "Bash(cp \"C:/Users/dor_r/OneDrive/מסמכים/@פרוייקט גמר/7. קוד/Random_Walk_Simulator_V2/comprehensive_boat_simulation_analysis.docx\" /tmp/boat_analysis.docx)",
+      "Bash(python -c \":*)",
+      "Bash(ls /tmp/boat_analysis*)",
+      "Bash(cp \"C:/Users/dor_r/OneDrive/מסמכים/@פרוייקט גמר/7. קוד/Random_Walk_Simulator_V2/comprehensive_boat_simulation_analysis.docx\" \"C:/tmp/boat_analysis.docx\")",
+      "Bash(C:/Users/dor_r/anaconda3/python.exe -c \"from simulation.engine import SimulationParams, run_single_simulation; p = SimulationParams\\(\\); r = run_single_simulation\\(p, seed=42\\); print\\(f''OK — {r.num_wall_hits} wall hits, {len\\(r.samples\\)} samples, total_time={r.total_time:.1f}s''\\)\")"
     ]
   }
 }

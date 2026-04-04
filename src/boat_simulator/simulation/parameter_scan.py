@@ -53,6 +53,17 @@ SCANNABLE_PARAMS: Dict[str, Dict[str, Any]] = {
         'unit': '\u00b0',
         'description': 'Initial heading direction',
     },
+    'max_samples': {
+        'label': 'Max Samples (n)',
+        'min': 3.0,
+        'max': 5000.0,
+        'default_step': 3.0,
+        'default_start': 6.0,
+        'default_stop': 30.0,
+        'unit': '',
+        'description': 'Number of water samples per run',
+        'is_int': True,
+    },
 }
 
 
@@ -188,7 +199,10 @@ def run_parameter_scan(
         if not _validate_scan_params(base_params, config.param_name, value):
             continue
 
-        modified_params = replace(base_params, **{config.param_name: value})
+        # Cast to int for integer-typed parameters (e.g. max_samples)
+        param_meta = SCANNABLE_PARAMS[config.param_name]
+        cast_value = int(value) if param_meta.get('is_int', False) else value
+        modified_params = replace(base_params, **{config.param_name: cast_value})
 
         morans_x_list = []
         morans_y_list = []
